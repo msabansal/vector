@@ -57,6 +57,7 @@ vector_common = { path = "../../vector-common", default-features = false, featur
 default = [
     "append",
     "array",
+    "map",
     "assert",
     "assert_eq",
     "boolean",
@@ -182,6 +183,7 @@ default = [
 
 append = []
 array = []
+map = []
 assert = []
 assert_eq = ["vector_common/conversion"]
 boolean = []
