@@ -9,15 +9,13 @@ use crate::{
     Context, Expression, Span, State, TypeDef, Value,
 };
 
-pub(crate) type Result = std::result::Result<Predicate, Error>;
-
 #[derive(Clone, PartialEq)]
 pub struct Predicate {
     inner: Vec<Expr>,
 }
 
 impl Predicate {
-    pub fn new(node: Node<Block>, state: &State) -> Result {
+    pub fn new(node: Node<Block>, state: &State) -> Result<Predicate, Error> {
         let (span, block) = node.take();
         let type_def = block.type_def(state);
 
@@ -80,6 +78,11 @@ impl Expression for Predicate {
             inner.compile_to_vm(vm, state)?;
         }
         Ok(())
+    }
+
+    #[cfg(feature = "llvm")]
+    fn emit_llvm<'ctx>(&self, _: &mut crate::llvm::Context<'ctx>) -> Result<(), String> {
+        todo!()
     }
 }
 

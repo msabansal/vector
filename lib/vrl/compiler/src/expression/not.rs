@@ -11,15 +11,13 @@ use crate::{
     Context, Expression, Span, State, TypeDef,
 };
 
-pub(crate) type Result = std::result::Result<Not, Error>;
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Not {
     inner: Box<Expr>,
 }
 
 impl Not {
-    pub fn new(node: Node<Expr>, not_span: Span, state: &State) -> Result {
+    pub fn new(node: Node<Expr>, not_span: Span, state: &State) -> Result<Not, Error> {
         let (expr_span, expr) = node.take();
         let type_def = expr.type_def(state);
 
@@ -63,6 +61,11 @@ impl Expression for Not {
         vm.write_opcode(OpCode::Not);
 
         Ok(())
+    }
+
+    #[cfg(feature = "llvm")]
+    fn emit_llvm<'ctx>(&self, _: &mut crate::llvm::Context<'ctx>) -> Result<(), String> {
+        todo!()
     }
 }
 
