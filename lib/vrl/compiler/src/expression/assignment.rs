@@ -163,8 +163,12 @@ impl Expression for Assignment {
     }
 
     #[cfg(feature = "llvm")]
-    fn emit_llvm<'ctx>(&self, ctx: &mut crate::llvm::Context<'ctx>) -> Result<(), String> {
-        self.variant.emit_llvm(ctx)
+    fn emit_llvm<'ctx>(
+        &self,
+        state: &crate::state::Compiler,
+        ctx: &mut crate::llvm::Context<'ctx>,
+    ) -> Result<(), String> {
+        self.variant.emit_llvm(state, ctx)
     }
 }
 
@@ -549,7 +553,11 @@ where
     }
 
     #[cfg(feature = "llvm")]
-    fn emit_llvm<'ctx>(&self, ctx: &mut crate::llvm::Context<'ctx>) -> Result<(), String> {
+    fn emit_llvm<'ctx>(
+        &self,
+        state: &crate::state::Compiler,
+        ctx: &mut crate::llvm::Context<'ctx>,
+    ) -> Result<(), String> {
         match self {
             Variant::Single { target, expr } => {
                 let function = ctx.function();
@@ -560,7 +568,7 @@ where
                     .build_unconditional_branch(assignment_single_begin_block);
                 ctx.builder().position_at_end(assignment_single_begin_block);
 
-                expr.emit_llvm(ctx)?;
+                expr.emit_llvm(state, ctx)?;
 
                 target.emit_llvm_insert(ctx)?;
             }
@@ -579,7 +587,7 @@ where
                 ctx.builder()
                     .position_at_end(assignment_infallible_begin_block);
 
-                expr.emit_llvm(ctx)?;
+                expr.emit_llvm(state, ctx)?;
 
                 let is_ok = {
                     let fn_ident = "vrl_resolved_is_ok";

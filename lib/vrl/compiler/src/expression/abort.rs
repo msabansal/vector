@@ -98,7 +98,11 @@ impl Expression for Abort {
     }
 
     #[cfg(feature = "llvm")]
-    fn emit_llvm<'ctx>(&self, ctx: &mut crate::llvm::Context<'ctx>) -> Result<(), String> {
+    fn emit_llvm<'ctx>(
+        &self,
+        state: &crate::state::Compiler,
+        ctx: &mut crate::llvm::Context<'ctx>,
+    ) -> Result<(), String> {
         let function = ctx.function();
         let abort_begin_block = ctx.context().append_basic_block(function, "abort_begin");
         ctx.builder().build_unconditional_branch(abort_begin_block);
@@ -130,7 +134,7 @@ impl Expression for Abort {
             if let Some(message) = &self.message {
                 let result_ref = ctx.result_ref();
                 ctx.set_result_ref(message_ref);
-                message.emit_llvm(ctx)?;
+                message.emit_llvm(state, ctx)?;
                 ctx.set_result_ref(result_ref);
             }
 
