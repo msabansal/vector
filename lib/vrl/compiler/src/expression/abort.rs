@@ -70,7 +70,7 @@ impl Expression for Abort {
     }
 
     fn type_def(&self, _: &State) -> TypeDef {
-        TypeDef::null().infallible()
+        TypeDef::null().infallible().abortable()
     }
 
     fn compile_to_vm(
