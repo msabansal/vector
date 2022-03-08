@@ -6,15 +6,18 @@ use std::{
 };
 
 use bytes::{BufMut, BytesMut};
+use codecs::{encoding::BoxedSerializer, NewlineDelimitedEncoder};
 use futures::{future, stream, FutureExt, SinkExt, TryFutureExt};
 use serde::{Deserialize, Serialize};
+use tokio_util::codec::Encoder as _;
 use tower::{Service, ServiceBuilder};
 use vector_core::ByteSizeOf;
 
-use super::util::SinkBatchSettings;
+use super::util::{encoding::Transformer, SinkBatchSettings};
 #[cfg(unix)]
 use crate::sinks::util::unix::UnixSinkConfig;
 use crate::{
+    codecs::Encoder,
     config::{
         AcknowledgementsConfig, GenerateConfig, Input, SinkConfig, SinkContext, SinkDescription,
     },
@@ -104,11 +107,17 @@ impl SinkConfig for StatsdSinkConfig {
         let default_namespace = self.default_namespace.clone();
         match &self.mode {
             Mode::Tcp(config) => {
-                let encode_event =
-                    move |event| encode_event(event, default_namespace.as_deref()).map(Into::into);
-                config.build(cx, encode_event)
+                let framer = NewlineDelimitedEncoder::new().into();
+                let serializer =
+                    (Box::new(StatsdSerializer { default_namespace }) as BoxedSerializer).into();
+                let encoder = Encoder::new(framer, serializer);
+                config.build(cx, Transformer::default(), encoder)
             }
             Mode::Udp(config) => {
+                let framer = NewlineDelimitedEncoder::new().into();
+                let serializer =
+                    (Box::new(StatsdSerializer { default_namespace }) as BoxedSerializer).into();
+                let mut encoder = Encoder::new(framer, serializer);
                 // 1432 bytes is a recommended packet size to fit into MTU
                 // https://github.com/statsd/statsd/blob/master/docs/metric_types.md#multi-metric-packets
                 // However we need to leave some space for +1 extra trailing event in the buffer.
@@ -127,8 +136,11 @@ impl SinkConfig for StatsdSinkConfig {
                 .with_flat_map(move |event: Event| {
                     stream::iter({
                         let byte_size = event.size_of();
-                        encode_event(event, default_namespace.as_deref())
-                            .map(|encoded| Ok(EncodedEvent::new(encoded, byte_size)))
+                        let mut encoded = BytesMut::new();
+                        encoder
+                            .encode(event, &mut encoded)
+                            .ok()
+                            .map(|_| Ok(EncodedEvent::new(encoded, byte_size)))
                     })
                 });
 
@@ -136,9 +148,11 @@ impl SinkConfig for StatsdSinkConfig {
             }
             #[cfg(unix)]
             Mode::Unix(config) => {
-                let encode_event =
-                    move |event| encode_event(event, default_namespace.as_deref()).map(Into::into);
-                config.build(cx, encode_event)
+                let framer = NewlineDelimitedEncoder::new().into();
+                let serializer =
+                    (Box::new(StatsdSerializer { default_namespace }) as BoxedSerializer).into();
+                let encoder = Encoder::new(framer, serializer);
+                config.build(cx, Transformer::default(), encoder)
             }
         }
     }
@@ -191,60 +205,73 @@ fn push_event<V: Display>(
     };
 }
 
-fn encode_event(event: Event, default_namespace: Option<&str>) -> Option<BytesMut> {
-    let mut buf = Vec::new();
+#[derive(Debug, Clone)]
+struct StatsdSerializer {
+    default_namespace: Option<String>,
+}
 
-    let metric = event.as_metric();
-    match metric.value() {
-        MetricValue::Counter { value } => {
-            push_event(&mut buf, metric, value, "c", None);
-        }
-        MetricValue::Gauge { value } => {
-            match metric.kind() {
-                MetricKind::Incremental => {
-                    push_event(&mut buf, metric, format!("{:+}", value), "g", None)
+impl tokio_util::codec::Encoder<Event> for StatsdSerializer {
+    type Error = crate::Error;
+
+    fn encode(&mut self, event: Event, buffer: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+        let mut buf = Vec::new();
+
+        let metric = event.as_metric();
+        match metric.value() {
+            MetricValue::Counter { value } => {
+                push_event(&mut buf, metric, value, "c", None);
+            }
+            MetricValue::Gauge { value } => {
+                match metric.kind() {
+                    MetricKind::Incremental => {
+                        push_event(&mut buf, metric, format!("{:+}", value), "g", None)
+                    }
+                    MetricKind::Absolute => push_event(&mut buf, metric, value, "g", None),
+                };
+            }
+            MetricValue::Distribution { samples, statistic } => {
+                let metric_type = match statistic {
+                    StatisticKind::Histogram => "h",
+                    StatisticKind::Summary => "d",
+                };
+                let samples = compress_distribution(samples.clone());
+                for sample in samples {
+                    push_event(
+                        &mut buf,
+                        metric,
+                        sample.value,
+                        metric_type,
+                        Some(sample.rate),
+                    );
                 }
-                MetricKind::Absolute => push_event(&mut buf, metric, value, "g", None),
-            };
-        }
-        MetricValue::Distribution { samples, statistic } => {
-            let metric_type = match statistic {
-                StatisticKind::Histogram => "h",
-                StatisticKind::Summary => "d",
-            };
-            let samples = compress_distribution(samples.clone());
-            for sample in samples {
-                push_event(
-                    &mut buf,
-                    metric,
-                    sample.value,
-                    metric_type,
-                    Some(sample.rate),
-                );
             }
-        }
-        MetricValue::Set { values } => {
-            for val in values {
-                push_event(&mut buf, metric, val, "s", None);
+            MetricValue::Set { values } => {
+                for val in values {
+                    push_event(&mut buf, metric, val, "s", None);
+                }
             }
-        }
-        _ => {
-            emit!(StatsdInvalidMetricError {
-                value: metric.value(),
-                kind: &metric.kind(),
-            });
+            _ => {
+                emit!(StatsdInvalidMetricError {
+                    value: metric.value(),
+                    kind: &metric.kind(),
+                });
 
-            return None;
-        }
-    };
+                return Ok(());
+            }
+        };
 
-    let message = encode_namespace(metric.namespace().or(default_namespace), '.', buf.join("|"));
+        let message = encode_namespace(
+            metric
+                .namespace()
+                .or_else(|| self.default_namespace.as_deref()),
+            '.',
+            buf.join("|"),
+        );
 
-    let mut body = BytesMut::new();
-    body.put_slice(&message.into_bytes());
-    body.put_u8(b'\n');
+        buffer.put_slice(&message.into_bytes());
 
-    Some(body)
+        Ok(())
+    }
 }
 
 impl Service<BytesMut> for StatsdSvc {
@@ -272,6 +299,15 @@ mod test {
 
     use super::*;
     use crate::{event::Metric, test_util::*};
+
+    fn encode_event(event: Event, default_namespace: Option<String>) -> Option<BytesMut> {
+        let framer = NewlineDelimitedEncoder::new().into();
+        let serializer =
+            (Box::new(StatsdSerializer { default_namespace }) as BoxedSerializer).into();
+        let mut encoder = Encoder::new(framer, serializer);
+        let mut bytes = BytesMut::new();
+        encoder.encode(event, &mut bytes).ok().map(|_| bytes)
+    }
 
     #[test]
     fn generate_config() {

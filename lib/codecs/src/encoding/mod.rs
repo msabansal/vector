@@ -200,6 +200,26 @@ pub enum Serializer {
     Json(JsonSerializer),
     /// Uses a `RawMessageSerializer` for serialization.
     RawMessage(RawMessageSerializer),
+    /// Uses an opaque `Serializer` implementation for serialization.
+    Boxed(BoxedSerializer),
+}
+
+impl From<JsonSerializer> for Serializer {
+    fn from(serializer: JsonSerializer) -> Self {
+        Self::Json(serializer)
+    }
+}
+
+impl From<RawMessageSerializer> for Serializer {
+    fn from(serializer: RawMessageSerializer) -> Self {
+        Self::RawMessage(serializer)
+    }
+}
+
+impl From<BoxedSerializer> for Serializer {
+    fn from(serializer: BoxedSerializer) -> Self {
+        Self::Boxed(serializer)
+    }
 }
 
 impl tokio_util::codec::Encoder<Event> for Serializer {
@@ -209,6 +229,7 @@ impl tokio_util::codec::Encoder<Event> for Serializer {
         match self {
             Serializer::Json(serializer) => serializer.encode(item, dst),
             Serializer::RawMessage(serializer) => serializer.encode(item, dst),
+            Serializer::Boxed(serializer) => serializer.encode(item, dst),
         }
     }
 }

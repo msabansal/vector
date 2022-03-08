@@ -6,15 +6,17 @@ use std::{
 };
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use futures::{future::BoxFuture, ready, stream::BoxStream, FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use tokio::{net::UdpSocket, sync::oneshot, time::sleep};
+use tokio_util::codec::Encoder as _;
 use vector_buffers::Acker;
 
 use super::SinkBuildError;
 use crate::{
+    codecs::Encoder,
     config::SinkContext,
     dns,
     event::Event,
@@ -23,7 +25,7 @@ use crate::{
         UdpSocketConnectionEstablished, UdpSocketError,
     },
     sinks::{
-        util::{retries::ExponentialBackoff, StreamSink},
+        util::{encoding::Transformer, retries::ExponentialBackoff, StreamSink},
         Healthcheck, VectorSink,
     },
     udp,
@@ -77,10 +79,11 @@ impl UdpSinkConfig {
     pub fn build(
         &self,
         cx: SinkContext,
-        encode_event: impl Fn(Event) -> Option<Bytes> + Send + Sync + 'static,
+        transformer: Transformer,
+        encoder: Encoder,
     ) -> crate::Result<(VectorSink, Healthcheck)> {
         let connector = self.build_connector(cx.clone())?;
-        let sink = UdpSink::new(connector.clone(), cx.acker(), encode_event);
+        let sink = UdpSink::new(connector.clone(), cx.acker(), transformer, encoder);
         Ok((
             VectorSink::from_event_streamsink(sink),
             async move { connector.healthcheck().await }.boxed(),
@@ -229,19 +232,22 @@ impl tower::Service<BytesMut> for UdpService {
 struct UdpSink {
     connector: UdpConnector,
     acker: Acker,
-    encode_event: Box<dyn Fn(Event) -> Option<Bytes> + Send + Sync>,
+    transformer: Transformer,
+    encoder: Encoder,
 }
 
 impl UdpSink {
-    fn new(
+    const fn new(
         connector: UdpConnector,
         acker: Acker,
-        encode_event: impl Fn(Event) -> Option<Bytes> + Send + Sync + 'static,
+        transformer: Transformer,
+        encoder: Encoder,
     ) -> Self {
         Self {
             connector,
             acker,
-            encode_event: Box::new(encode_event),
+            transformer,
+            encoder,
         }
     }
 }
@@ -251,21 +257,24 @@ impl StreamSink<Event> for UdpSink {
     async fn run(self: Box<Self>, input: BoxStream<'_, Event>) -> Result<(), ()> {
         let mut input = input.peekable();
 
+        let mut encoder = self.encoder.clone();
         while Pin::new(&mut input).peek().await.is_some() {
             let mut socket = self.connector.connect_backoff().await;
-            while let Some(event) = input.next().await {
+            while let Some(mut event) = input.next().await {
                 self.acker.ack(1);
 
-                let input = match (self.encode_event)(event) {
-                    Some(input) => input,
-                    None => continue,
-                };
+                self.transformer.transform(&mut event);
 
-                match udp_send(&mut socket, &input).await {
+                let mut bytes = BytesMut::new();
+                if encoder.encode(event, &mut bytes).is_err() {
+                    continue;
+                }
+
+                match udp_send(&mut socket, &bytes).await {
                     Ok(()) => emit!(SocketEventsSent {
                         mode: SocketMode::Udp,
                         count: 1,
-                        byte_size: input.len(),
+                        byte_size: bytes.len(),
                     }),
                     Err(error) => {
                         emit!(UdpSocketError { error });
