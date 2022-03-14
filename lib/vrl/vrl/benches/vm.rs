@@ -45,12 +45,38 @@ fn benchmark_kind_display(c: &mut Criterion) {
         let runtime = Runtime::new(state);
         let tz = TimeZone::default();
         let functions = vrl_stdlib::all();
-        let program = vrl::compile(source.code, &functions).unwrap();
+        let mut state = vrl::state::Compiler::new();
+        let program = vrl::compile_with_state(source.code, &functions, &mut state).unwrap();
         let vm = runtime
             .compile(functions, &program, Default::default())
             .unwrap();
+        let builder = vrl::llvm::Builder::new().unwrap();
+        let context = builder.compile(&state, &program).unwrap();
+        context.optimize();
+        let execute = context.get_jit_function().unwrap();
 
-        group.bench_with_input(BenchmarkId::new("Vm", source.name), &vm, |b, vm| {
+        group.bench_with_input(
+            BenchmarkId::new("LLVM", source.name),
+            &execute,
+            |b, execute| {
+                b.iter_with_setup(
+                    || Value::Object(BTreeMap::default()),
+                    |mut obj| {
+                        {
+                            let mut context = core::Context {
+                                target: &mut obj,
+                                timezone: &tz,
+                            };
+                            let mut result = Ok(Value::Null);
+                            unsafe { execute.call(&mut context, &mut result) };
+                        }
+                        obj // Return the obj so it doesn't get dropped.
+                    },
+                )
+            },
+        );
+
+        group.bench_with_input(BenchmarkId::new("VM", source.name), &vm, |b, vm| {
             let state = state::Runtime::default();
             let mut runtime = Runtime::new(state);
             b.iter_with_setup(

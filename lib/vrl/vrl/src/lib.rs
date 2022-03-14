@@ -10,7 +10,7 @@ pub mod prelude;
 mod runtime;
 
 pub use compiler::{
-    function, state, value, vm::Vm, Context, Expression, Function, Program, Target, Value,
+    function, llvm, state, value, vm::Vm, Context, Expression, Function, Program, Target, Value,
     VrlRuntime,
 };
 pub use diagnostic;
