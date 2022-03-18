@@ -463,9 +463,9 @@ impl Expression for FunctionCall {
             .module()
             .get_function(&function_name)
             .unwrap_or_else(|| {
-                let mut arguments = Vec::new();
-                arguments.resize(self.arguments.len() + 1, argument_type.into());
-                let function_type = ctx.context().void_type().fn_type(&arguments, false);
+                // let mut arguments = Vec::new();
+                // arguments.resize(self.arguments.len() + 1, argument_type.into());
+                let function_type = ctx.context().void_type().fn_type(&[], false);
 
                 ctx.module()
                     .add_function(&function_name, function_type, None)
@@ -508,8 +508,7 @@ impl Expression for FunctionCall {
 
         argument_refs.push(ctx.result_ref().into());
 
-        ctx.builder()
-            .build_call(function, &argument_refs, self.ident);
+        ctx.builder().build_call(function, &[], self.ident);
 
         argument_refs.pop();
 

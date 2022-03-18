@@ -8906,6 +8906,7 @@ dependencies = [
  "bytes 1.1.0",
  "criterion",
  "indoc",
+ "inkwell",
  "lookup",
  "ordered-float",
  "thiserror",

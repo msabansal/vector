@@ -7,7 +7,7 @@ fn main() {
         "{}/src/precompiled/target/{}/{}/precompiled.bc",
         env::var("CARGO_MANIFEST_DIR").unwrap(),
         env::var("TARGET").unwrap(),
-        env::var("PROFILE").unwrap()
+        "release", // env::var("PROFILE").unwrap()
     ));
 
     if precompiled_path.exists() {

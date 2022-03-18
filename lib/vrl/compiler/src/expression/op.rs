@@ -383,10 +383,10 @@ impl Expression for Op {
                         .get_function(fn_ident)
                         .ok_or(format!(r#"failed to get "{}" function"#, fn_ident))?;
                     ctx.builder()
-                        .build_call(fn_impl, &[resolved_temp_ref.into()], fn_ident)
-                };
-                ctx.set_result_ref(resolved_temp_ref);
+                        .build_call(fn_impl, &[resolved_temp_ref.into()], fn_ident);
+                }
 
+                ctx.set_result_ref(resolved_temp_ref);
                 self.rhs.emit_llvm(state, ctx)?;
 
                 {
@@ -429,10 +429,10 @@ impl Expression for Op {
                         .get_function(fn_ident)
                         .ok_or(format!(r#"failed to get "{}" function"#, fn_ident))?;
                     ctx.builder()
-                        .build_call(fn_impl, &[resolved_temp_ref.into()], fn_ident)
-                };
-                ctx.set_result_ref(resolved_temp_ref);
+                        .build_call(fn_impl, &[resolved_temp_ref.into()], fn_ident);
+                }
 
+                ctx.set_result_ref(resolved_temp_ref);
                 self.rhs.emit_llvm(state, ctx)?;
 
                 {

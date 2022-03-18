@@ -16,6 +16,7 @@ ordered-float = "2"
 parser = { package = "vrl-parser", path = "../parser" }
 thiserror = "1"
 vector_common = { path = "../../vector-common", default-features = false }
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm13-0"] }
 
 [dev-dependencies]
 criterion = "0.3"
@@ -24,4 +25,8 @@ vrl-stdlib = { path = "../stdlib" }
 
 [[bench]]
 name = "vm"
+harness = false
+
+[[bench]]
+name = "foo"
 harness = false

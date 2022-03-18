@@ -31,6 +31,10 @@ impl Builder {
         program: &Program,
     ) -> Result<Context, String> {
         let context = &self.0;
+        println!(
+            "precompiled location: {}",
+            concat!(env!("OUT_DIR"), "/precompiled.bc")
+        );
         let buffer = MemoryBuffer::create_from_memory_range(PRECOMPILED, "precompiled");
         let module = Module::parse_bitcode_from_buffer(&buffer, context)
             .map_err(|string| string.to_string())?;
@@ -47,11 +51,31 @@ impl Builder {
             block.remove_from_function().unwrap();
         }
 
+        // let context_type = function.get_nth_param(0).unwrap().get_type();
+        // let result_type = function.get_nth_param(1).unwrap().get_type();
+
+        // println!("aa");
+        // unsafe { function.delete() };
+        // println!("bb");
+
+        // let function_name = VRL_EXECUTE_SYMBOL.to_owned();
+        // println!("bla 0");
+        // let function_type = context
+        //     .void_type()
+        //     .fn_type(&[context_type.into(), result_type.into()], false);
+        // println!("bla 1");
+        // let function = module.add_function(&function_name, function_type, None);
+        // println!("bla 1.1");
+        // let context_ref = function.get_nth_param(0).unwrap().into_pointer_value();
+        // let result_ref = function.get_nth_param(1).unwrap().into_pointer_value();
+
+        // println!("bla 2");
+
         let start = context.append_basic_block(function, "start");
         builder.position_at_end(start);
 
         let execution_engine = module
-            .create_jit_execution_engine(OptimizationLevel::Aggressive)
+            .create_jit_execution_engine(OptimizationLevel::None) // OptimizationLevel::Aggressive
             .map_err(|string| string.to_string())?;
 
         let mut context = Context {

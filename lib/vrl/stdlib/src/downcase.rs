@@ -50,6 +50,7 @@ struct DowncaseFn {
     value: Box<dyn Expression>,
 }
 
+#[inline(never)]
 #[no_mangle]
 pub extern "C" fn vrl_fn_downcase(value: &mut Resolved, resolved: &mut Resolved) {
     let value = {
