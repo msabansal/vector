@@ -41,6 +41,7 @@ pub type Result = std::result::Result<Program, compiler::Errors>;
 pub enum VrlRuntime {
     Ast,
     Vm,
+    Llvm,
 }
 
 impl Default for VrlRuntime {
@@ -56,7 +57,8 @@ impl FromStr for VrlRuntime {
         match s {
             "ast" => Ok(Self::Ast),
             "vm" => Ok(Self::Vm),
-            _ => Err("runtime must be ast or vm."),
+            "llvm" => Ok(Self::Llvm),
+            _ => Err("runtime must be ast, vm or llvm."),
         }
     }
 }
@@ -69,6 +71,7 @@ impl Display for VrlRuntime {
             match self {
                 VrlRuntime::Ast => "ast",
                 VrlRuntime::Vm => "vm",
+                VrlRuntime::Llvm => "llvm",
             }
         )
     }
