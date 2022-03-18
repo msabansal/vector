@@ -98,7 +98,7 @@ impl Builder {
             context.module.print_to_file(&file).unwrap();
         }
 
-        if !context.function.verify(false) {
+        if !context.function.verify(true) {
             return Err(format!(
                 "Generated code for VRL function failed verification:\n{:?}",
                 context.function

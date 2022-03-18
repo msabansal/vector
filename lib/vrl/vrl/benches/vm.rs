@@ -55,6 +55,19 @@ fn benchmark_kind_display(c: &mut Criterion) {
         context.optimize();
         let execute = context.get_jit_function().unwrap();
 
+        {
+            println!("yo");
+            let mut obj = Value::Object(BTreeMap::default());
+            let mut context = core::Context {
+                target: &mut obj,
+                timezone: &tz,
+            };
+            let mut result = Ok(Value::Null);
+            println!("bla");
+            unsafe { execute.call(&mut context, &mut result) };
+            println!("derp");
+        }
+
         group.bench_with_input(
             BenchmarkId::new("LLVM", source.name),
             &execute,
