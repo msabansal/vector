@@ -274,18 +274,14 @@ impl<'ctx> Context<'ctx> {
     }
 
     pub fn build_alloca_resolved(&self, name: &str) -> inkwell::values::PointerValue<'ctx> {
-        let resolved_type_identifier =
-            "std::result::Result<vrl_compiler::Value, vrl_compiler::ExpressionError>";
         let resolved_type = self
-            .module
-            .get_struct_type(resolved_type_identifier)
-            .unwrap_or_else(|| {
-                panic!(
-                    r#"failed getting type "{}" from module"#,
-                    resolved_type_identifier
-                )
-            });
-
+            .function
+            .get_nth_param(1)
+            .unwrap()
+            .get_type()
+            .into_pointer_type()
+            .get_element_type()
+            .into_struct_type();
         self.builder.build_alloca(resolved_type, name)
     }
 

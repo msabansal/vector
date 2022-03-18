@@ -399,8 +399,18 @@ impl Expression for Op {
                         fn_impl,
                         &[resolved_temp_ref.into(), result_ref.into()],
                         fn_ident,
-                    )
-                };
+                    );
+                }
+
+                {
+                    let fn_ident = "vrl_resolved_drop";
+                    let fn_impl = ctx
+                        .module()
+                        .get_function(fn_ident)
+                        .ok_or(format!(r#"failed to get "{}" function"#, fn_ident))?;
+                    ctx.builder()
+                        .build_call(fn_impl, &[resolved_temp_ref.into()], fn_ident);
+                }
 
                 ctx.set_result_ref(result_ref);
             }
@@ -435,8 +445,18 @@ impl Expression for Op {
                         fn_impl,
                         &[resolved_temp_ref.into(), result_ref.into()],
                         fn_ident,
-                    )
-                };
+                    );
+                }
+
+                {
+                    let fn_ident = "vrl_resolved_drop";
+                    let fn_impl = ctx
+                        .module()
+                        .get_function(fn_ident)
+                        .ok_or(format!(r#"failed to get "{}" function"#, fn_ident))?;
+                    ctx.builder()
+                        .build_call(fn_impl, &[resolved_temp_ref.into()], fn_ident);
+                }
 
                 ctx.set_result_ref(result_ref);
             }
