@@ -6,16 +6,14 @@ use uuid::Uuid;
 use vector_core::{event::Finalizable, ByteSizeOf};
 
 use crate::{
+    codecs::Encoder,
     event::Event,
     sinks::{
         s3_common::{
             config::S3Options,
             service::{S3Metadata, S3Request},
         },
-        util::{
-            encoding::{EncodingConfig, StandardEncodings},
-            Compression, RequestBuilder,
-        },
+        util::{encoding::Transformer, Compression, RequestBuilder},
     },
 };
 
@@ -26,14 +24,14 @@ pub struct S3RequestOptions {
     pub filename_append_uuid: bool,
     pub filename_extension: Option<String>,
     pub api_options: S3Options,
-    pub encoding: EncodingConfig<StandardEncodings>,
+    pub encoder: (Transformer, Encoder),
     pub compression: Compression,
 }
 
 impl RequestBuilder<(String, Vec<Event>)> for S3RequestOptions {
     type Metadata = S3Metadata;
     type Events = Vec<Event>;
-    type Encoder = EncodingConfig<StandardEncodings>;
+    type Encoder = (Transformer, Encoder);
     type Payload = Bytes;
     type Request = S3Request;
     type Error = io::Error; // TODO: this is ugly.
@@ -43,7 +41,7 @@ impl RequestBuilder<(String, Vec<Event>)> for S3RequestOptions {
     }
 
     fn encoder(&self) -> &Self::Encoder {
-        &self.encoding
+        &self.encoder
     }
 
     fn split_input(&self, input: (String, Vec<Event>)) -> (Self::Metadata, Self::Events) {

@@ -64,9 +64,11 @@ mod config;
 mod fixed;
 mod with_default;
 
-use std::{fmt::Debug, io, sync::Arc};
+use std::{fmt::Debug, io};
 
+use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
+use tokio_util::codec::Encoder as _;
 
 use crate::{
     event::{Event, LogEvent, MaybeAsLogMut, Value},
@@ -101,12 +103,23 @@ pub trait Encoder<T> {
     }
 }
 
-impl<E, T> Encoder<T> for Arc<E>
-where
-    E: Encoder<T>,
-{
-    fn encode_input(&self, input: T, writer: &mut dyn io::Write) -> io::Result<usize> {
-        (**self).encode_input(input, writer)
+impl Encoder<Vec<Event>> for (Transformer, crate::codecs::Encoder) {
+    fn encode_input(&self, events: Vec<Event>, writer: &mut dyn io::Write) -> io::Result<usize> {
+        let mut encoder = self.1.clone();
+
+        Ok(events
+            .into_iter()
+            .map(|mut event| {
+                self.0.transform(&mut event);
+                let mut bytes = BytesMut::new();
+                encoder
+                    .encode(event, &mut bytes)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                writer.write(&bytes)
+            })
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .sum())
     }
 }
 

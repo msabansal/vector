@@ -1,13 +1,19 @@
 use std::convert::TryInto;
 
 use aws_sdk_s3::Client as S3Client;
+use codecs::{
+    encoding::{FramingConfig, SerializerConfig},
+    BytesEncoder, JsonSerializerConfig, NewlineDelimitedEncoderConfig, RawMessageSerializerConfig,
+};
 use serde::{Deserialize, Serialize};
 use tower::ServiceBuilder;
 use vector_core::sink::VectorSink;
 
 use super::sink::S3RequestOptions;
 use crate::aws::{AwsAuthentication, RegionOrEndpoint};
+use crate::sinks::util::encoding::{EncodingConfigAdapter, EncodingConfigMigrator};
 use crate::{
+    codecs::Encoder,
     config::{AcknowledgementsConfig, GenerateConfig, Input, ProxyConfig, SinkConfig, SinkContext},
     sinks::{
         s3_common::{
@@ -31,6 +37,27 @@ const DEFAULT_KEY_PREFIX: &str = "date=%F/";
 const DEFAULT_FILENAME_TIME_FORMAT: &str = "%s";
 const DEFAULT_FILENAME_APPEND_UUID: bool = true;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Migrator;
+
+impl EncodingConfigMigrator for Migrator {
+    type Codec = StandardEncodings;
+
+    fn migrate(codec: &Self::Codec) -> (Option<FramingConfig>, SerializerConfig) {
+        let framing = match codec {
+            StandardEncodings::Text | StandardEncodings::Json => None,
+            StandardEncodings::Ndjson => Some(NewlineDelimitedEncoderConfig::new().into()),
+        };
+        let serializer = match codec {
+            StandardEncodings::Text => RawMessageSerializerConfig::new().into(),
+            StandardEncodings::Json | StandardEncodings::Ndjson => {
+                JsonSerializerConfig::new().into()
+            }
+        };
+        (framing, serializer)
+    }
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct S3SinkConfig {
@@ -43,7 +70,8 @@ pub struct S3SinkConfig {
     pub options: S3Options,
     #[serde(flatten)]
     pub region: RegionOrEndpoint,
-    pub encoding: EncodingConfig<StandardEncodings>,
+    #[serde(flatten)]
+    pub encoding: EncodingConfigAdapter<EncodingConfig<StandardEncodings>, Migrator>,
     #[serde(default = "Compression::gzip_default")]
     pub compression: Compression,
     #[serde(default)]
@@ -71,7 +99,7 @@ impl GenerateConfig for S3SinkConfig {
             filename_extension: None,
             options: S3Options::default(),
             region: RegionOrEndpoint::default(),
-            encoding: StandardEncodings::Text.into(),
+            encoding: EncodingConfig::from(StandardEncodings::Text).into(),
             compression: Compression::gzip_default(),
             batch: BatchConfig::default(),
             request: TowerRequestConfig::default(),
@@ -141,13 +169,18 @@ impl S3SinkConfig {
             .filename_append_uuid
             .unwrap_or(DEFAULT_FILENAME_APPEND_UUID);
 
+        let transformer = self.encoding.transformer();
+        let (framer, serializer) = self.encoding.clone().encoding();
+        let framer = framer.unwrap_or_else(|| BytesEncoder::new().into());
+        let encoder = Encoder::new(framer, serializer);
+
         let request_options = S3RequestOptions {
             bucket: self.bucket.clone(),
             api_options: self.options.clone(),
             filename_extension: self.filename_extension.clone(),
             filename_time_format,
             filename_append_uuid,
-            encoding: self.encoding.clone(),
+            encoder: (transformer, encoder),
             compression: self.compression,
         };
 
