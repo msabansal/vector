@@ -1,6 +1,7 @@
 use std::convert::TryFrom;
 
 use async_trait::async_trait;
+use codecs::BytesEncoder;
 use futures::{future, stream::BoxStream, StreamExt};
 use rdkafka::{
     consumer::{BaseConsumer, Consumer},
@@ -15,6 +16,7 @@ use vector_core::{buffers::Acker, config::log_schema};
 
 use super::config::{KafkaRole, KafkaSinkConfig};
 use crate::{
+    codecs::Encoder,
     event::Event,
     kafka::KafkaStatisticsContext,
     sinks::{
@@ -22,11 +24,7 @@ use crate::{
             config::QUEUED_MIN_MESSAGES, request_builder::KafkaRequestBuilder,
             service::KafkaService,
         },
-        util::{
-            builder::SinkBuilderExt,
-            encoding::{EncodingConfig, StandardEncodings},
-            StreamSink,
-        },
+        util::{builder::SinkBuilderExt, encoding::Transformer, StreamSink},
     },
     template::{Template, TemplateParseError},
 };
@@ -40,7 +38,8 @@ pub(super) enum BuildError {
 }
 
 pub struct KafkaSink {
-    encoding: EncodingConfig<StandardEncodings>,
+    transformer: Transformer,
+    encoder: Encoder,
     acker: Acker,
     service: KafkaService,
     topic: Template,
@@ -61,10 +60,15 @@ impl KafkaSink {
     pub(crate) fn new(config: KafkaSinkConfig, acker: Acker) -> crate::Result<Self> {
         let producer_config = config.to_rdkafka(KafkaRole::Producer)?;
         let producer = create_producer(producer_config)?;
+        let transformer = config.encoding.transformer();
+        let (framer, serializer) = config.encoding.encoding();
+        let framer = framer.unwrap_or_else(|| BytesEncoder::new().into());
+        let encoder = Encoder::new(framer, serializer);
 
         Ok(KafkaSink {
             headers_key: config.headers_key,
-            encoding: config.encoding,
+            transformer,
+            encoder,
             acker,
             service: KafkaService::new(producer),
             topic: Template::try_from(config.topic).context(TopicTemplateSnafu)?,
@@ -75,11 +79,12 @@ impl KafkaSink {
     async fn run_inner(self: Box<Self>, input: BoxStream<'_, Event>) -> Result<(), ()> {
         // rdkafka will internally retry forever, so we need some limit to prevent this from overflowing
         let service = ConcurrencyLimit::new(self.service, QUEUED_MIN_MESSAGES as usize);
-        let request_builder = KafkaRequestBuilder {
+        let mut request_builder = KafkaRequestBuilder {
             key_field: self.key_field,
             headers_key: self.headers_key,
             topic_template: self.topic,
-            encoder: self.encoding,
+            transformer: self.transformer,
+            encoder: self.encoder,
             log_schema: log_schema(),
         };
         let sink = input

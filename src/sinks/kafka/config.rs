@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+use codecs::{
+    encoding::{FramingConfig, SerializerConfig},
+    JsonSerializerConfig, NewlineDelimitedEncoderConfig, RawMessageSerializerConfig,
+};
 use futures::FutureExt;
 use rdkafka::ClientConfig;
 use serde::{Deserialize, Serialize};
@@ -11,7 +15,9 @@ use crate::{
     sinks::{
         kafka::sink::{healthcheck, KafkaSink},
         util::{
-            encoding::{EncodingConfig, StandardEncodings},
+            encoding::{
+                EncodingConfig, EncodingConfigAdapter, EncodingConfigMigrator, StandardEncodings,
+            },
             BatchConfig, NoDefaultsBatchSettings,
         },
         Healthcheck, VectorSink,
@@ -20,12 +26,34 @@ use crate::{
 
 pub(crate) const QUEUED_MIN_MESSAGES: u64 = 100000;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Migrator;
+
+impl EncodingConfigMigrator for Migrator {
+    type Codec = StandardEncodings;
+
+    fn migrate(codec: &Self::Codec) -> (Option<FramingConfig>, SerializerConfig) {
+        let framing = match codec {
+            StandardEncodings::Text | StandardEncodings::Json => None,
+            StandardEncodings::Ndjson => Some(NewlineDelimitedEncoderConfig::new().into()),
+        };
+        let serializer = match codec {
+            StandardEncodings::Text => RawMessageSerializerConfig::new().into(),
+            StandardEncodings::Json | StandardEncodings::Ndjson => {
+                JsonSerializerConfig::new().into()
+            }
+        };
+        (framing, serializer)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct KafkaSinkConfig {
     pub bootstrap_servers: String,
     pub topic: String,
     pub key_field: Option<String>,
-    pub(crate) encoding: EncodingConfig<StandardEncodings>,
+    #[serde(flatten)]
+    pub(crate) encoding: EncodingConfigAdapter<EncodingConfig<StandardEncodings>, Migrator>,
     /// These batching options will **not** override librdkafka_options values.
     #[serde(default)]
     pub batch: BatchConfig<NoDefaultsBatchSettings>,
@@ -163,7 +191,7 @@ impl GenerateConfig for KafkaSinkConfig {
             bootstrap_servers: "10.14.22.123:9092,10.14.23.332:9092".to_owned(),
             topic: "topic-1234".to_owned(),
             key_field: Some("user_id".to_owned()),
-            encoding: StandardEncodings::Json.into(),
+            encoding: EncodingConfig::from(StandardEncodings::Json).into(),
             batch: Default::default(),
             compression: KafkaCompression::None,
             auth: Default::default(),
