@@ -347,7 +347,6 @@ azure_core = { git = "https://github.com/Azure/azure-sdk-for-rust.git", rev = "3
 azure_storage = { git = "https://github.com/Azure/azure-sdk-for-rust.git", rev = "3ca5610b959b3b6b77bb88da09f0764b605b01bc", features = ["azurite_workaround"] }
 azure_storage_blobs = { git = "https://github.com/Azure/azure-sdk-for-rust.git", rev = "3ca5610b959b3b6b77bb88da09f0764b605b01bc", default-features = false, features = ["azurite_workaround"] }
 
-
 [patch.crates-io]
 # A patch for lib/vector-core/buffers, addresses Issue 7514
 leveldb-sys = { git = "https://github.com/vectordotdev/leveldb-sys.git", branch = "leveldb_mmap_limit" }
@@ -400,6 +399,7 @@ vendor-all = ["vendor-libz", "vendor-openssl", "vendor-sasl"]
 vendor-sasl = ["rdkafka/gssapi-vendored"]
 vendor-openssl = ["openssl/vendored"]
 vendor-libz = ["libz-sys/static"]
+
 
 # Enables kubernetes dependencies and shared code. Kubernetes-related sources,
 # transforms and sinks should depend on this feature.

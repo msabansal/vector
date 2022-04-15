@@ -206,6 +206,8 @@ impl TaskTransform<Event> for Geneva {
                                             parameters
                                         }
                                         Err(TransformError::TemplateRenderingError(error)) => {
+                                            // TODO
+                                            let _client = Arc::clone(&*PIPE_CLIENT);
                                             emit!(&crate::internal_events::TemplateRenderingError {
                                                 error,
                                                 drop_event: false,
@@ -225,14 +227,20 @@ impl TaskTransform<Event> for Geneva {
                                     let tx = tx.clone();
                                     requests.fetch_add(1, Ordering::SeqCst);
                                     tokio::spawn(async move {
-                                        let client = Arc::clone(&*PIPE_CLIENT);
-                                        let result = client.request(RequestData{
-                                            parameters: parameters,
-                                        }).await;
+                                        let data = RequestData{
+                                                parameters: parameters,
+                                            };
+                                        tracing::trace!("Data {:?}", data);
+                                        // let client = Arc::clone(&*PIPE_CLIENT);
+                                        // let result = client.request(RequestData{
+                                        //     parameters: parameters,
+                                        // }).await;
 
-                                        if let Ok(result) = result {
-                                            tracing::info!("Got result {}", result);
-                                        }
+                                        // if let Ok(result) = result {
+                                        //     tracing::info!("Got result {}", result);
+                                        // }
+
+                                        tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
 
                                         if let Err(_) = tx.send(event).await {
                                             tracing::info!("Event dropped");
