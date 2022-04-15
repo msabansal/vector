@@ -66,6 +66,8 @@ pub mod stdin;
 pub mod syslog;
 #[cfg(feature = "sources-vector")]
 pub mod vector;
+#[cfg(feature = "sources-single_file")]
+pub mod single_file;
 
 pub(crate) mod util;
 

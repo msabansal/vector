@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, convert::TryFrom};
 use std::{pin::Pin, time::Duration};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
     config::{
@@ -178,6 +179,8 @@ impl TaskTransform<Event> for Geneva {
 
                 let limiter = RateLimiter::direct(quota);
                 let mut input_rx = input_rx.ratelimit_stream(&limiter);
+                // Not required as we are on a single thread but it is good practice
+                let requests = AtomicUsize::new(0);
 
                 loop {
                 let mut output = Vec::new();
@@ -186,7 +189,9 @@ impl TaskTransform<Event> for Geneva {
 
                     maybe_event = input_rx.next() => {
                         match maybe_event {
-                            None => true,
+                            None => {
+                                true
+                            },
                             Some(event) => {
                                 if inner.config.dry_run {
                                     let mut outputs =
@@ -218,6 +223,7 @@ impl TaskTransform<Event> for Geneva {
                                         }
                                     };
                                     let tx = tx.clone();
+                                    requests.fetch_add(1, Ordering::SeqCst);
                                     tokio::spawn(async move {
                                         let client = Arc::clone(&*PIPE_CLIENT);
                                         let result = client.request(RequestData{
@@ -238,12 +244,23 @@ impl TaskTransform<Event> for Geneva {
                         }
                     }
                     event = rx.recv() => {
+                        requests.fetch_sub(1, Ordering::SeqCst);
                         output.push(event.unwrap());
                         false
                     }
                 };
                 yield stream::iter(output.into_iter());
-                if done { break }
+                if done {
+                    while requests.load(Ordering::Relaxed) > 0 {
+                        tracing::info!("Waiting for requests to complete {}", requests.load(Ordering::Relaxed));
+                        let event = rx.recv().await;
+                        requests.fetch_sub(1, Ordering::SeqCst);
+                        let mut output = Vec::new();
+                        output.push(event.unwrap());
+                        yield stream::iter(output.into_iter());
+                    }
+                    break;
+                }
               }
             }
             .flatten(),
