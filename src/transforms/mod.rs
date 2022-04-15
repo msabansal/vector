@@ -70,6 +70,9 @@ pub mod throttle;
 #[cfg(feature = "transforms-tokenizer")]
 pub mod tokenizer;
 
+#[cfg(all(feature = "transforms-geneva", windows))]
+pub mod geneva;
+
 pub use vector_core::transform::{
     FunctionTransform, OutputBuffer, SyncTransform, TaskTransform, Transform, TransformOutputs,
     TransformOutputsBuf,
