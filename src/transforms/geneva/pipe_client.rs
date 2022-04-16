@@ -27,6 +27,7 @@ pub struct Request {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RequestData {
+    pub environment: String,
     pub endpoint: String,
     pub extension: String,
     pub id: String,

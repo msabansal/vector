@@ -10,7 +10,7 @@ use crate::{
         TransformDescription,
     },
     event::Event,
-    template::{Template},
+    template::Template,
     transforms::{
         remap::{Remap, RemapConfig},
         TaskTransform, Transform, TransformOutputsBuf,
@@ -34,6 +34,7 @@ use pipe_client::{Client, RequestData};
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct GenevaConfig {
+    environment: String,
     extension: String,
     endpoint: String,
     operation: String,
@@ -52,8 +53,7 @@ pub struct Geneva {
     pub transform: Option<Box<Remap>>,
 }
 
-static PIPE_CLIENT: Lazy<Arc<Client>> =
-    Lazy::new(|| Arc::new(Client::new().unwrap()));
+static PIPE_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| Arc::new(Client::new().unwrap()));
 
 impl Clone for Geneva {
     fn clone(&self) -> Self {
@@ -71,6 +71,7 @@ inventory::submit! {
 impl GenerateConfig for GenevaConfig {
     fn generate_config() -> toml::Value {
         toml::Value::try_from(Self {
+            environment: "Test".to_string(),
             extension: "CanaryExtension".to_string(),
             endpoint: "Endpoint1".to_string(),
             operation: "JsonOutput".to_string(),
@@ -200,15 +201,16 @@ impl TaskTransform<Event> for Geneva {
                                     TransformOutputsBuf::new_with_capacity(vec![Output::default(DataType::Any)], 1);
                                     let transform = inner.transform.clone();
                                     transform.unwrap().transform(event, &mut outputs);
-                                    let mut result = outputs.take_primary();
-                                    outputs.push(result.pop().unwrap());
+                                    let result = outputs.take_primary().pop().unwrap();
+                                    outputs.push(result);
                                 } else {
+                                    let environment = render_template(&inner.config.environment, &event);
                                     let endpoint = render_template(&inner.config.endpoint, &event);
                                     let extension = render_template(&inner.config.extension, &event);
                                     let operation = render_template(&inner.config.operation, &event);
                                     let parameters = render_tags(&inner.config.parameters, &event);
 
-                                    if endpoint.is_err() || extension.is_err() || operation.is_err() || parameters.is_err() {
+                                    if environment.is_err() || endpoint.is_err() || extension.is_err() || operation.is_err() || parameters.is_err() {
                                         event.metadata_mut().update_status(EventStatus::Errored);
                                         if let Err(_) = tx.send(event).await {
                                             tracing::info!("Event dropped");
@@ -220,10 +222,11 @@ impl TaskTransform<Event> for Geneva {
                                     requests.fetch_add(1, Ordering::SeqCst);
                                     tokio::spawn(async move {
                                         let data = RequestData{
-                                                endpoint: endpoint.unwrap(),
-                                                extension: extension.unwrap(),
-                                                id: operation.unwrap(),
-                                                parameters: parameters.unwrap(),
+                                            environment: environment.unwrap(),
+                                            endpoint: endpoint.unwrap(),
+                                            extension: extension.unwrap(),
+                                            id: operation.unwrap(),
+                                            parameters: parameters.unwrap(),
                                         };
 
                                         tracing::trace!("Data {:?}", data);
