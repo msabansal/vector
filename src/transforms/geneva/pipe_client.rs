@@ -1,7 +1,10 @@
-use std::{collections::{BTreeMap, HashMap}, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, process::{Child, Command}};
 use tokio::{
     io::{ReadHalf, WriteHalf},
     net::windows::named_pipe::{ClientOptions, NamedPipeClient},
@@ -9,6 +12,7 @@ use tokio::{
 };
 use tokio_serde::formats::*;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use uuid::Uuid;
 
 use crate::Result;
 
@@ -18,11 +22,14 @@ use futures::stream::StreamExt;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Request {
     id: i32,
-    data: String,
+    data: RequestData,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RequestData {
+    pub endpoint: String,
+    pub extension: String,
+    pub id: String,
     pub parameters: Option<BTreeMap<String, String>>,
 }
 
@@ -30,31 +37,29 @@ pub struct RequestData {
 pub struct Response {
     id: i32,
     pub data: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ResponseData {
-    Pong,
-    Get(String),
-    Set(String),
+    pub status: String,
 }
 
 pub struct Client {
     inner: Arc<Mutex<Inner>>,
+    _process: Child,
 }
 
 impl Client {
-    pub fn new(pipe_name: &str) -> Result<Client> {
+    pub fn new() -> Result<Client> {
+        let pipe_name = Uuid::new_v4().to_string();
+        let pipe_name_client = format!("\\\\.\\pipe\\{}", pipe_name);
+        let process= Command::new("acisrunner.exe").arg(pipe_name).spawn()?;
         Ok(Client {
-            inner: Inner::new(pipe_name)?
+            _process: process,
+            inner: Inner::new(&pipe_name_client.as_str())?,
         })
     }
 
-    pub async fn request(&self, request: RequestData) -> Result<String> {
+    pub async fn request(&self, request: RequestData) -> Result<Response> {
         let client = Arc::clone(&self.inner);
         println!("Request sent ");
-        let response = Inner::queue_request(client, request).await?;
-        Ok(response.data)
+        Inner::queue_request(client, request).await
     }
 }
 
@@ -73,7 +78,19 @@ struct Inner {
 
 impl Inner {
     pub fn new(pipe_name: &str) -> Result<Arc<Mutex<Inner>>> {
-        let client = ClientOptions::new().open(pipe_name)?;
+        let mut count = 0;
+        let client = loop {
+            match ClientOptions::new().open(pipe_name) {
+                Ok(client) => break client,
+                Err(e) => {
+                    if count > 10 {
+                        let _ = Err(e)?;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    count += 1;
+                }
+            }
+        };
 
         let (reader, writer) = tokio::io::split(client);
         let (tx, rx) = oneshot::channel::<()>();
@@ -124,7 +141,7 @@ impl Inner {
         let id = client.request_id;
         let request = Request {
             id: client.request_id,
-            data: serde_json::to_string(&request).unwrap(),
+            data: request,
         };
         client.request_map.insert(id, tx);
         let result = client.pipe.send(request).await;
@@ -136,7 +153,6 @@ impl Inner {
 
         Ok(rx.await?)
     }
-
 
     async fn handle_requests(
         reader: ReadHalf<NamedPipeClient>,
@@ -160,11 +176,11 @@ impl Inner {
                         if let Ok(data) = data {
                             client.lock().await.notify_listeners(data).await;
                         } else {
-                            println!("{:?}", data);
+                            println!("A=>{:?}", data);
                         }
                     } else {
-                        println!("{:?}", data);
-                        break;
+                        println!("B=>{:?}", data);
+                        // break;
                     }
                 }
             }

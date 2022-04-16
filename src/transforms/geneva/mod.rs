@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{collections::BTreeMap, convert::TryFrom};
 use std::{pin::Pin, time::Duration};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use vector_core::event::EventStatus;
 
 use crate::{
     config::{
@@ -9,7 +10,7 @@ use crate::{
         TransformDescription,
     },
     event::Event,
-    template::{Template, TemplateParseError, TemplateRenderingError},
+    template::{Template},
     transforms::{
         remap::{Remap, RemapConfig},
         TaskTransform, Transform, TransformOutputsBuf,
@@ -51,7 +52,7 @@ pub struct Geneva {
 }
 
 static PIPE_CLIENT: Lazy<Arc<Client>> =
-    Lazy::new(|| Arc::new(Client::new(r"\\.\pipe\testpipe").unwrap()));
+    Lazy::new(|| Arc::new(Client::new().unwrap()));
 
 impl Clone for Geneva {
     fn clone(&self) -> Self {
@@ -82,22 +83,20 @@ impl GenerateConfig for GenevaConfig {
     }
 }
 
-enum TransformError {
-    TemplateParseError(TemplateParseError),
-    TemplateRenderingError(TemplateRenderingError),
-}
+// enum TransformError {
+//     TemplateParseError(TemplateParseError),
+//     TemplateRenderingError(TemplateRenderingError),
+// }
 
-fn render_template(s: &str, event: &Event) -> std::result::Result<String, TransformError> {
-    let template = Template::try_from(s).map_err(TransformError::TemplateParseError)?;
-    template
-        .render_string(event)
-        .map_err(TransformError::TemplateRenderingError)
+fn render_template(s: &str, event: &Event) -> crate::Result<String> {
+    let template = Template::try_from(s)?;
+    Ok(template.render_string(event)?)
 }
 
 fn render_tags(
     tags: &Option<IndexMap<String, String>>,
     event: &Event,
-) -> std::result::Result<Option<BTreeMap<String, String>>, TransformError> {
+) -> crate::Result<Option<BTreeMap<String, String>>> {
     Ok(match tags {
         None => None,
         Some(tags) => {
@@ -192,7 +191,7 @@ impl TaskTransform<Event> for Geneva {
                             None => {
                                 true
                             },
-                            Some(event) => {
+                            Some(mut event) => {
                                 if inner.config.dry_run {
                                     let mut outputs =
                                     TransformOutputsBuf::new_with_capacity(vec![Output::default(DataType::Any)], 1);
@@ -201,47 +200,31 @@ impl TaskTransform<Event> for Geneva {
                                     let mut result = outputs.take_primary();
                                     outputs.push(result.pop().unwrap());
                                 } else {
-                                     let parameters = match render_tags(&inner.config.parameters, &event) {
-                                        Ok(parameters) => {
-                                            parameters
-                                        }
-                                        Err(TransformError::TemplateRenderingError(error)) => {
-                                            // TODO
-                                            let _client = Arc::clone(&*PIPE_CLIENT);
-                                            emit!(&crate::internal_events::TemplateRenderingError {
-                                                error,
-                                                drop_event: false,
-                                                field: None,
-                                            });
-                                            // TODO
-                                            None
-                                        }
-                                        Err(TransformError::TemplateParseError(error)) => {
-                                            emit!(&crate::internal_events::LogToMetricTemplateParseError {
-                                                error
-                                            });
-                                            // TODO
-                                            None
-                                        }
-                                    };
+                                    let endpoint = render_template(&inner.config.endpoint, &event);
+                                    let extension = render_template(&inner.config.extension, &event);
+                                    let operation = render_template(&inner.config.operation, &event);
+                                    let parameters = render_tags(&inner.config.parameters, &event);
+
+                                    if endpoint.is_err() || extension.is_err() || operation.is_err() || parameters.is_err() {
+                                        event.metadata_mut().update_status(EventStatus::Errored);
+                                        continue;
+                                    }
+
                                     let tx = tx.clone();
                                     requests.fetch_add(1, Ordering::SeqCst);
                                     tokio::spawn(async move {
                                         let data = RequestData{
-                                                parameters: parameters,
-                                            };
+                                                endpoint: endpoint.unwrap(),
+                                                extension: extension.unwrap(),
+                                                id: operation.unwrap(),
+                                                parameters: parameters.unwrap(),
+                                        };
                                         tracing::trace!("Data {:?}", data);
-                                        // let client = Arc::clone(&*PIPE_CLIENT);
-                                        // let result = client.request(RequestData{
-                                        //     parameters: parameters,
-                                        // }).await;
-
-                                        // if let Ok(result) = result {
-                                        //     tracing::info!("Got result {}", result);
-                                        // }
-
-                                        tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
-
+                                        let client = Arc::clone(&*PIPE_CLIENT);
+                                        let result = client.request(data).await;
+                                        if let Ok(result) = result {
+                                            tracing::info!("Got result {:?}", result);
+                                        }
                                         if let Err(_) = tx.send(event).await {
                                             tracing::info!("Event dropped");
                                         }

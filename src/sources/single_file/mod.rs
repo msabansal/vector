@@ -2,12 +2,9 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use crate::trace::current_span;
-use tracing::error;
-
-use super::util::{finalizer::OrderedFinalizer, EncodingConfig};
+use tracing::{error, info};
 
 use crate::{
     config::{log_schema, DataType, Output, SourceConfig, SourceContext, SourceDescription},
@@ -15,24 +12,25 @@ use crate::{
     event::{BatchNotifier, Event, LogEvent},
     line_agg::{self, LineAgg},
     shutdown::ShutdownSignal,
-    sources::util::MultilineConfig,
+    sources::util::{EncodingConfig, MultilineConfig},
     SourceSender,
 };
-mod file_writer;
+mod file_checkpoint;
 use regex::bytes::Regex;
 mod watch_file;
 use file_reader::Line;
-use std::collections::HashSet;
+use tokio::sync::mpsc;
 use tokio::task::spawn_blocking;
 mod file_reader;
 use futures_util::{FutureExt, TryFutureExt};
+
+use self::file_checkpoint::FinalizerEntry;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SingleFileConfig {
     pub include: PathBuf,
     pub save_path: Option<PathBuf>,
     pub line_delimiter: String,
-    pub success_field: Option<String>,
     pub encoding: Option<EncodingConfig>,
     pub message_start_indicator: Option<String>,
     pub multiline: Option<MultilineConfig>,
@@ -48,8 +46,7 @@ impl Default for SingleFileConfig {
             encoding: None,
             message_start_indicator: None,
             multiline: None,
-            success_field: None,
-            max_inflight: 30,
+            max_inflight: 50,
         }
     }
 }
@@ -57,15 +54,10 @@ impl Default for SingleFileConfig {
 impl SingleFileConfig {}
 
 inventory::submit! {
-    SourceDescription::new::<SingleFileConfig>("single_file")
+    SourceDescription::new::<SingleFileConfig>("geneva_file")
 }
 
 impl_generate_config_from_default!(SingleFileConfig);
-
-#[derive(Debug)]
-pub(crate) struct FinalizerEntry {
-    pub(crate) offset: usize,
-}
 
 fn wrap_with_line_agg(
     rx: impl Stream<Item = Line> + Send + std::marker::Unpin + 'static,
@@ -87,64 +79,36 @@ fn create_event(line: Bytes) -> Event {
     event.into()
 }
 
-pub fn read_restore_points(
-    file_path: &PathBuf
-) -> crate::Result<HashSet<usize>> {
-    let mut file = file_reader::FileReader::new(
-        file_path,
-        100,
-        Bytes::from("\n"),
-    )?;
-
-    let mut set = HashSet::<usize>::new();
-    while let Some(line) = file.read_line()? {
-        set.insert(std::str::from_utf8(&line.data)?.parse::<usize>()?);
-    }
-    Ok(set)
-}
-
 pub fn file_source(
     config: &SingleFileConfig,
     shutdown: ShutdownSignal,
     mut out: SourceSender,
 ) -> super::Source {
     let encoding_charset = config.encoding.clone().map(|e| e.charset);
-    let acknowledgements = true;
     let shutdown = shutdown.shared();
-    let (completion_tx, mut completion_rx) = tokio::sync::mpsc::channel::<()>(config.max_inflight);
-    let mut restore_file = config.include.clone();
+    let (completion_tx, mut completion_rx) = mpsc::channel::<()>(config.max_inflight);
+    let file_checkpoint =
+        file_checkpoint::FileCheckpoint::new(shutdown.clone(), completion_tx,&config.include).unwrap();
+    // let (sender, mut new_entries) = mpsc::unbounded_channel();
 
-    let mut file_name = restore_file.file_name().unwrap().to_os_string();
-    file_name.push(".checkpoint");
-    restore_file.set_file_name(file_name);
+    // let finalizer = if acknowledgements {
+    //     Some(OrderedFinalizer::new(
+    //         shutdown.clone(),
+    //         move |entry: FinalizerEntry| {
+    //             {
+    //                 let mut guard = file_writer.lock().unwrap();
+    //                 guard.write_pos(entry.offset).unwrap();
+    //             }
 
-    let to_drop = match read_restore_points(&restore_file) {
-        Ok(set) => set,
-        Err(e) => {
-            error!("Failed to read restore points: {}", e);
-            HashSet::new()
-        }
-    };
-    let file_writer = file_writer::FileWriter::new(&restore_file).unwrap();
-    let file_writer = Arc::new(Mutex::new(file_writer));
-    let finalizer = if acknowledgements {
-        Some(OrderedFinalizer::new(
-            shutdown.clone(),
-            move |entry: FinalizerEntry| {
-                {
-                    let mut guard = file_writer.lock().unwrap();
-                    guard.write_pos(entry.offset).unwrap();
-                }
-
-                let completion_tx = completion_tx.clone();
-                tokio::spawn(async move {
-                    let _t = completion_tx.send(()).await;
-                });
-            },
-        ))
-    } else {
-        None
-    };
+    //             let completion_tx = completion_tx.clone();
+    //             tokio::spawn(async move {
+    //                 let _t = completion_tx.send(()).await;
+    //             });
+    //         },
+    //     ))
+    // } else {
+    //     None
+    // };
 
     let multiline_config = config.multiline.clone();
     let message_start_indicator = config.message_start_indicator.clone();
@@ -196,19 +160,20 @@ pub fn file_source(
         let span = current_span();
         let span2 = span.clone();
         let shutdown = shutdown.clone();
+        let sender_event = file_checkpoint.sender();
         let mut messages = messages
-            .filter(move |line| futures::future::ready(!to_drop.contains(&line.number)))
+            .filter(move |line| {
+                futures::future::ready(!file_checkpoint.checkpoints.contains(&line.number))
+            })
             .map(move |line| {
                 let _enter = span2.enter();
                 let mut event = create_event(line.data);
-                if let Some(finalizer) = &finalizer {
-                    let (batch, receiver) = BatchNotifier::new_with_receiver();
-                    event = event.with_batch_notifier(&batch);
-                    let entry = FinalizerEntry {
-                        offset: line.number,
-                    };
-                    finalizer.add(entry, receiver);
-                }
+                let (batch, receiver) = BatchNotifier::new_with_receiver();
+                event = event.with_batch_notifier(&batch);
+                let entry = FinalizerEntry {
+                    offset: line.number,
+                };
+                let _ = sender_event.send((receiver, entry));
                 event
             });
 
@@ -222,7 +187,7 @@ pub fn file_source(
                         if let Some(result) = result {
                             let _ = out.send(result).await;
                         } else {
-                            tracing::info!("File source finished sending messages");
+                            info!("File source finished sending messages");
                             break;
                         }
                         remaining -= 1;
@@ -233,7 +198,7 @@ pub fn file_source(
                         }
                     }
                     _shutdown = shutdown.clone() => {
-                        tracing::info!("File source shutdown");
+                        info!("File source shutdown");
                         break;
                     }
                 }
@@ -259,7 +224,7 @@ pub fn file_source(
 }
 
 #[async_trait::async_trait]
-#[typetag::serde(name = "single_file")]
+#[typetag::serde(name = "geneva_file")]
 impl SourceConfig for SingleFileConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<super::Source> {
         Ok(file_source(self, cx.shutdown, cx.out))
@@ -270,6 +235,6 @@ impl SourceConfig for SingleFileConfig {
     }
 
     fn source_type(&self) -> &'static str {
-        "single_file"
+        "geneva_file"
     }
 }
