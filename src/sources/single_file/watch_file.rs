@@ -1,13 +1,15 @@
 use tracing::{error};
 
-use file_source::{file_watcher::FileWatcher, FileFingerprint, Line};
+use crate::sources::single_file::Line;
 
 use futures::{
     stream, Sink, SinkExt,
 };
 
+use super::file_reader::FileReader;
+
 pub fn run<C>(
-    mut watcher: FileWatcher,
+    mut watcher: FileReader,
     mut chans: C,
 ) -> Result<(), <C as Sink<Vec<Line>>>::Error>
 where
@@ -22,14 +24,9 @@ where
         loop {
             match watcher.read_line() {
                 Ok(Some(line)) => {
-                    bytes_read += line.len();
+                    bytes_read += line.data.len();
 
-                    lines.push(Line {
-                        text: line,
-                        filename: watcher.path.to_str().expect("not a valid path").to_owned(),
-                        file_id: FileFingerprint::Unknown(0),
-                        offset: watcher.get_file_position(),
-                    });
+                    lines.push(line);
 
                     if bytes_read >= max_read_bytes {
                         break;

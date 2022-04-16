@@ -2,29 +2,29 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-use crate::trace::{current_span};
-use tracing::{error};
+use crate::trace::current_span;
+use tracing::error;
 
 use super::util::{finalizer::OrderedFinalizer, EncodingConfig};
 
-use file_source::{file_watcher::FileWatcher, Line, ReadFrom};
-
-use crate::internal_events::FileBytesReceived;
-use crate::internal_events::FileEventsReceived;
 use crate::{
     config::{log_schema, DataType, Output, SourceConfig, SourceContext, SourceDescription},
     encoding_transcode::{Decoder, Encoder},
     event::{BatchNotifier, Event, LogEvent},
-    shutdown::ShutdownSignal,
-    SourceSender,
     line_agg::{self, LineAgg},
+    shutdown::ShutdownSignal,
     sources::util::MultilineConfig,
+    SourceSender,
 };
+mod file_writer;
 use regex::bytes::Regex;
 mod watch_file;
+use file_reader::Line;
 use std::collections::HashSet;
 use tokio::task::spawn_blocking;
+mod file_reader;
 use futures_util::{FutureExt, TryFutureExt};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
@@ -64,9 +64,8 @@ impl_generate_config_from_default!(SingleFileConfig);
 
 #[derive(Debug)]
 pub(crate) struct FinalizerEntry {
-    pub(crate) offset: u64,
+    pub(crate) offset: usize,
 }
-
 
 fn wrap_with_line_agg(
     rx: impl Stream<Item = Line> + Send + std::marker::Unpin + 'static,
@@ -74,27 +73,12 @@ fn wrap_with_line_agg(
 ) -> Box<dyn Stream<Item = Line> + Send + std::marker::Unpin + 'static> {
     let logic = line_agg::Logic::new(config);
     Box::new(
-        LineAgg::new(
-            rx.map(|line| (line.filename, line.text, (line.file_id, line.offset))),
-            logic,
-        )
-        .map(|(filename, text, (file_id, offset))| Line {
-            text,
-            filename,
-            file_id,
-            offset,
-        }),
+        LineAgg::new(rx.map(|line| ("", line.data, line.number)), logic)
+            .map(|(_file, data, number)| Line { data, number }),
     )
 }
 
-
-fn create_event(line: Bytes, file: String) -> Event {
-    emit!(&FileEventsReceived {
-        count: 1,
-        file: &file,
-        byte_size: line.len(),
-    });
-
+fn create_event(line: Bytes) -> Event {
     let mut event = LogEvent::from(line);
 
     // Add source type
@@ -102,6 +86,23 @@ fn create_event(line: Bytes, file: String) -> Event {
 
     event.into()
 }
+
+pub fn read_restore_points(
+    file_path: &PathBuf
+) -> crate::Result<HashSet<usize>> {
+    let mut file = file_reader::FileReader::new(
+        file_path,
+        100,
+        Bytes::from("\n"),
+    )?;
+
+    let mut set = HashSet::<usize>::new();
+    while let Some(line) = file.read_line()? {
+        set.insert(std::str::from_utf8(&line.data)?.parse::<usize>()?);
+    }
+    Ok(set)
+}
+
 pub fn file_source(
     config: &SingleFileConfig,
     shutdown: ShutdownSignal,
@@ -111,19 +112,40 @@ pub fn file_source(
     let acknowledgements = true;
     let shutdown = shutdown.shared();
     let (completion_tx, mut completion_rx) = tokio::sync::mpsc::channel::<()>(config.max_inflight);
+    let mut restore_file = config.include.clone();
+
+    let mut file_name = restore_file.file_name().unwrap().to_os_string();
+    file_name.push(".checkpoint");
+    restore_file.set_file_name(file_name);
+
+    let to_drop = match read_restore_points(&restore_file) {
+        Ok(set) => set,
+        Err(e) => {
+            error!("Failed to read restore points: {}", e);
+            HashSet::new()
+        }
+    };
+    let file_writer = file_writer::FileWriter::new(&restore_file).unwrap();
+    let file_writer = Arc::new(Mutex::new(file_writer));
     let finalizer = if acknowledgements {
-        Some(OrderedFinalizer::new(shutdown.clone(), move |entry: FinalizerEntry| {
-            info!("Finalizing file source {:?}", entry.offset);
-            let completion_tx = completion_tx.clone();
-            tokio::spawn(async move {
-                let _t = completion_tx.send(()).await;
-            });
-        }))
+        Some(OrderedFinalizer::new(
+            shutdown.clone(),
+            move |entry: FinalizerEntry| {
+                {
+                    let mut guard = file_writer.lock().unwrap();
+                    guard.write_pos(entry.offset).unwrap();
+                }
+
+                let completion_tx = completion_tx.clone();
+                tokio::spawn(async move {
+                    let _t = completion_tx.send(()).await;
+                });
+            },
+        ))
     } else {
         None
     };
 
-    let done = HashSet::new();
     let multiline_config = config.multiline.clone();
     let message_start_indicator = config.message_start_indicator.clone();
 
@@ -143,14 +165,10 @@ pub fn file_source(
             .map(futures::stream::iter)
             .flatten()
             .map(move |mut line| {
-                emit!(&FileBytesReceived {
-                    byte_size: line.text.len(),
-                    file: &line.filename,
-                });
                 // transcode each line from the file's encoding charset to utf8
-                line.text = match encoding_decoder.as_mut() {
-                    Some(d) => d.decode_to_utf8(line.text),
-                    None => line.text,
+                line.data = match encoding_decoder.as_mut() {
+                    Some(d) => d.decode_to_utf8(line.data),
+                    None => line.data,
                 };
                 line
             });
@@ -177,25 +195,27 @@ pub fn file_source(
         // logs in the queue.
         let span = current_span();
         let span2 = span.clone();
-        let shutdown= shutdown.clone();
-        let mut messages = messages.map(move |line| {
-            let _enter = span2.enter();
-            let mut event = create_event(line.text, line.filename);
-            if let Some(finalizer) = &finalizer {
-                let (batch, receiver) = BatchNotifier::new_with_receiver();
-                event = event.with_batch_notifier(&batch);
-                let entry = FinalizerEntry {
-                    offset: line.offset,
-                };
-                finalizer.add(entry, receiver);
-            }
-            event
-        });
+        let shutdown = shutdown.clone();
+        let mut messages = messages
+            .filter(move |line| futures::future::ready(!to_drop.contains(&line.number)))
+            .map(move |line| {
+                let _enter = span2.enter();
+                let mut event = create_event(line.data);
+                if let Some(finalizer) = &finalizer {
+                    let (batch, receiver) = BatchNotifier::new_with_receiver();
+                    event = event.with_batch_notifier(&batch);
+                    let entry = FinalizerEntry {
+                        offset: line.number,
+                    };
+                    finalizer.add(entry, receiver);
+                }
+                event
+            });
 
         tokio::spawn(async move {
             let mut remaining = max_inflight;
             loop {
-                tokio::select!{
+                tokio::select! {
                     biased;
 
                     result = messages.next(), if remaining > 0 => {
@@ -222,10 +242,8 @@ pub fn file_source(
         let span = info_span!("file_server");
         spawn_blocking(move || {
             let _enter = span.enter();
-            let watcher = FileWatcher::new(
-                path,
-                ReadFrom::Beginning,
-                None,
+            let watcher = file_reader::FileReader::new(
+                &path,
                 bytesize::kib(100u64) as usize,
                 line_delimiter_as_bytes,
             );

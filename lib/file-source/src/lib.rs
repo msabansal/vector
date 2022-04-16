@@ -6,7 +6,7 @@ extern crate scan_fmt;
 pub mod buffer;
 mod checkpointer;
 mod file_server;
-pub mod file_watcher;
+mod file_watcher;
 mod fingerprinter;
 mod internal_events;
 mod metadata_ext;
