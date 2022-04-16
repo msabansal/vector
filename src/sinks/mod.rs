@@ -83,6 +83,8 @@ pub mod splunk_hec;
 pub mod statsd;
 #[cfg(feature = "sinks-vector")]
 pub mod vector;
+#[cfg(feature = "sinks-reject")]
+pub mod reject;
 
 pub use vector_core::sink::VectorSink;
 

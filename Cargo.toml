@@ -634,6 +634,7 @@ sinks-logs = [
   "sinks-influxdb",
   "sinks-kafka",
   "sinks-logdna",
+  "sinks-reject",
   "sinks-loki",
   "sinks-nats",
   "sinks-new_relic_logs",
@@ -699,6 +700,7 @@ sinks-splunk_hec = []
 sinks-statsd = ["sinks-utils-udp", "tokio-util/net"]
 sinks-utils-udp = []
 sinks-vector = ["sinks-utils-udp", "tonic", "protobuf-build"]
+sinks-reject = []
 
 # Datadog integration
 datadog-pipelines = [

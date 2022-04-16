@@ -1,12 +1,10 @@
 use futures::{future, FutureExt};
 use serde::{Deserialize, Serialize};
-use tokio::io;
 
 use crate::{
     config::{GenerateConfig, Input, SinkConfig, SinkContext},
     sinks::{
         reject::sink::WriterSink,
-        util::encoding::{EncodingConfig, StandardEncodings},
         Healthcheck, VectorSink,
     },
 };
@@ -27,7 +25,7 @@ impl GenerateConfig for RejectSinkConfig {
 #[async_trait::async_trait]
 #[typetag::serde(name = "reject")]
 impl SinkConfig for RejectSinkConfig {
-    async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
+    async fn build(&self, _cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
 
         let sink: VectorSink = VectorSink::from_event_streamsink(WriterSink {
         });

@@ -1,10 +1,10 @@
 mod config;
 mod sink;
 
-pub use config::{ConsoleSinkConfig, Target};
+pub use config::{RejectSinkConfig};
 
 use crate::config::SinkDescription;
 
 inventory::submit! {
-    SinkDescription::new::<ConsoleSinkConfig>("console")
+    SinkDescription::new::<RejectSinkConfig>("reject")
 }
