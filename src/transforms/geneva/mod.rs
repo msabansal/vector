@@ -215,7 +215,7 @@ impl TaskTransform<Event> for Geneva {
                                         }
                                         continue;
                                     }
-
+                                    let target_field = target_field.clone();
                                     let tx = tx.clone();
                                     requests.fetch_add(1, Ordering::SeqCst);
                                     tokio::spawn(async move {
