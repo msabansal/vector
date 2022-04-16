@@ -233,7 +233,7 @@ impl TaskTransform<Event> for Geneva {
 
                                         if let Ok(result) = result {
                                             let json_value = serde_json::to_value(result).unwrap();
-                                            event.as_mut_log().insert(target_field, json_value);
+                                            event.as_mut_log().insert(&target_field, json_value);
                                         } else {
                                             event.metadata_mut().update_status(EventStatus::Errored);
                                         }
