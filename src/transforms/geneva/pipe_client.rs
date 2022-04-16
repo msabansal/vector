@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use tracing::{trace, debug, info, error};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::oneshot, process::{Child, Command}};
 use tokio::{
@@ -59,7 +60,7 @@ impl Client {
 
     pub async fn request(&self, request: RequestData) -> Result<Response> {
         let client = Arc::clone(&self.inner);
-        println!("Request sent ");
+        trace!("Request sent to runner");
         Inner::queue_request(client, request).await
     }
 }
@@ -116,7 +117,7 @@ impl Inner {
 
         tokio::spawn(async move {
             let result = Inner::handle_requests(reader, rx, &cloned).await;
-            println!("{:?}", result);
+            debug!("Named pipe listener stopped {:?}", result);
         });
 
         Ok(piped)
@@ -128,7 +129,7 @@ impl Inner {
         if let Some(waiter) = waiter {
             waiter.send(response).unwrap();
         } else {
-            println!("No waiter for response: {:?}", response.id);
+            debug!("No waiter for response: {:?}", response.id);
         }
     }
 
@@ -177,11 +178,11 @@ impl Inner {
                         if let Ok(data) = data {
                             client.lock().await.notify_listeners(data).await;
                         } else {
-                            println!("A=>{:?}", data);
+                            error!("Error in response {:?}", data);
                         }
                     } else {
-                        println!("B=>{:?}", data);
-                        // break;
+                        info!("Named pipe stream closed");
+                        break;
                     }
                 }
             }
