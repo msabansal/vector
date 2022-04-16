@@ -22,7 +22,7 @@ impl FileWriter {
         let line_number = line_number.to_string();
         self.writer.write(line_number.as_bytes())?;
         self.writer.write("\n".as_bytes())?;
-        self.writer.flush();
+        self.writer.flush()?;
         Ok(())
     }
 }
