@@ -49,7 +49,7 @@ impl Client {
     pub fn new() -> Result<Client> {
         let pipe_name = Uuid::new_v4().to_string();
         let pipe_name_client = format!("\\\\.\\pipe\\{}", pipe_name);
-        let process= Command::new("acisrunner.exe").arg(pipe_name).spawn()?;
+        let process= Command::new("acisrunner.exe").arg(pipe_name).kill_on_drop(true).spawn()?;
         Ok(Client {
             _process: process,
             inner: Inner::new(&pipe_name_client.as_str())?,

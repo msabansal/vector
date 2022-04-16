@@ -37,6 +37,7 @@ pub struct GenevaConfig {
     extension: String,
     endpoint: String,
     operation: String,
+    target: String,
     parameters: Option<IndexMap<String, String>>,
     threshold: Option<u32>,
     window_secs: Option<f64>,
@@ -75,6 +76,7 @@ impl GenerateConfig for GenevaConfig {
             operation: "JsonOutput".to_string(),
             parameters: None,
             window_secs: None,
+            target: "Response".to_string(),
             threshold: None,
             dry_run: false,
             dry_run_output: ".bar = parse_json!(string!(.foo))".to_owned(),
@@ -172,6 +174,7 @@ impl TaskTransform<Event> for Geneva {
         let quota = Quota::with_period(Duration::from_secs(1))
             .unwrap()
             .allow_burst(NonZeroU32::new(1).unwrap());
+        let target_field = inner.config.target.clone();
 
         Box::pin(
             stream! {
@@ -207,6 +210,9 @@ impl TaskTransform<Event> for Geneva {
 
                                     if endpoint.is_err() || extension.is_err() || operation.is_err() || parameters.is_err() {
                                         event.metadata_mut().update_status(EventStatus::Errored);
+                                        if let Err(_) = tx.send(event).await {
+                                            tracing::info!("Event dropped");
+                                        }
                                         continue;
                                     }
 
@@ -219,11 +225,17 @@ impl TaskTransform<Event> for Geneva {
                                                 id: operation.unwrap(),
                                                 parameters: parameters.unwrap(),
                                         };
+
                                         tracing::trace!("Data {:?}", data);
                                         let client = Arc::clone(&*PIPE_CLIENT);
                                         let result = client.request(data).await;
+                                        tracing::trace!("Result {:?}", result);
+
                                         if let Ok(result) = result {
-                                            tracing::info!("Got result {:?}", result);
+                                            let json_value = serde_json::to_value(result).unwrap();
+                                            event.as_mut_log().insert(target_field, json_value);
+                                        } else {
+                                            event.metadata_mut().update_status(EventStatus::Errored);
                                         }
                                         if let Err(_) = tx.send(event).await {
                                             tracing::info!("Event dropped");
