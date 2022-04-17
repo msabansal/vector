@@ -201,10 +201,12 @@ impl TaskTransform<Event> for Geneva {
                                     TransformOutputsBuf::new_with_capacity(vec![Output::default(DataType::Any)], 1);
                                     let transform = inner.transform.clone();
                                     transform.unwrap().transform(event, &mut outputs);
-                                    let result = outputs.take_primary().pop();
+                                    let mut result = outputs.take_primary().pop().unwrap();
+                                    result.metadata_mut().update_status(EventStatus::Rejected);
+
                                     // tracing::info!("Result: {:?}", result);
                                     // output.push(result);
-                                    yield result.unwrap();
+                                    yield result;
                                 } else {
                                     let environment = render_template(&inner.config.environment, &event);
                                     let endpoint = render_template(&inner.config.endpoint, &event);
