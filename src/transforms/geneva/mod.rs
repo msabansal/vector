@@ -24,7 +24,7 @@ use vector_common::TimeZone;
 pub mod pipe_client;
 use crate::vector_core::transform::SyncTransform;
 use async_stream::stream;
-use futures::{stream, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use governor::{Quota, RateLimiter};
 use std::num::NonZeroU32;
 
@@ -53,7 +53,7 @@ pub struct Geneva {
     pub transform: Option<Box<Remap>>,
 }
 
-static PIPE_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| Arc::new(Client::new().unwrap()));
+static PIPE_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| Arc::new(Client::new()));
 
 impl Clone for Geneva {
     fn clone(&self) -> Self {
@@ -186,7 +186,7 @@ impl TaskTransform<Event> for Geneva {
                 let requests = AtomicUsize::new(0);
 
                 loop {
-                let mut output = Vec::new();
+                // let mut output = Vec::new();
                 let done = tokio::select! {
                     biased;
 
@@ -201,8 +201,10 @@ impl TaskTransform<Event> for Geneva {
                                     TransformOutputsBuf::new_with_capacity(vec![Output::default(DataType::Any)], 1);
                                     let transform = inner.transform.clone();
                                     transform.unwrap().transform(event, &mut outputs);
-                                    let result = outputs.take_primary().pop().unwrap();
-                                    outputs.push(result);
+                                    let result = outputs.take_primary().pop();
+                                    // tracing::info!("Result: {:?}", result);
+                                    // output.push(result);
+                                    yield result.unwrap();
                                 } else {
                                     let environment = render_template(&inner.config.environment, &event);
                                     let endpoint = render_template(&inner.config.endpoint, &event);
@@ -251,25 +253,30 @@ impl TaskTransform<Event> for Geneva {
                     }
                     event = rx.recv() => {
                         requests.fetch_sub(1, Ordering::SeqCst);
-                        output.push(event.unwrap());
+                        // output.push(event);
+                        yield event.unwrap();
                         false
                     }
                 };
-                yield stream::iter(output.into_iter());
+                // yield stream::iter(output.into_iter());
                 if done {
                     while requests.load(Ordering::Relaxed) > 0 {
                         tracing::info!("Waiting for requests to complete {}", requests.load(Ordering::Relaxed));
                         let event = rx.recv().await;
                         requests.fetch_sub(1, Ordering::SeqCst);
-                        let mut output = Vec::new();
-                        output.push(event.unwrap());
-                        yield stream::iter(output.into_iter());
+                        // let mut output = Vec::new();
+                        // output.push(event.unwrap());
+                        // yield stream::iter(output.into_iter());
+                        yield event.unwrap();
                     }
+
+                    let client = Arc::clone(&*PIPE_CLIENT);
+                    client.drop_inner().await;
                     break;
                 }
               }
             }
-            .flatten(),
+            // .flatten(),
         )
     }
 }

@@ -1,18 +1,22 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::Arc,
 };
 
-use tracing::{trace, debug, info, error};
 use serde::{Deserialize, Serialize};
-use tokio::{sync::oneshot, process::{Child, Command}};
 use tokio::{
-    io::{ReadHalf, WriteHalf},
     net::windows::named_pipe::{ClientOptions, NamedPipeClient},
-    sync::Mutex,
+    sync::{Mutex, oneshot::Receiver},
+};
+use tokio::{
+    process::{Child, Command},
+    sync::{
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        oneshot::{self, Sender},
+    },
 };
 use tokio_serde::formats::*;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use tracing::{debug, error, info, trace};
 use uuid::Uuid;
 
 use crate::Result;
@@ -45,46 +49,54 @@ pub struct Response {
 }
 
 pub struct Client {
-    inner: Arc<Mutex<Inner>>,
-    _process: Child,
+    inner: Mutex<Option<Inner>>,
 }
 
 impl Client {
-    pub fn new() -> Result<Client> {
-        let pipe_name = Uuid::new_v4().to_string();
-        let pipe_name_client = format!("\\\\.\\pipe\\{}", pipe_name);
-        let process= Command::new("acisrunner.exe").arg(pipe_name).kill_on_drop(true).spawn()?;
-        Ok(Client {
-            _process: process,
-            inner: Inner::new(&pipe_name_client.as_str())?,
-        })
+    pub fn new() -> Client {
+        Client {
+            inner: Mutex::new(None),
+        }
     }
 
     pub async fn request(&self, request: RequestData) -> Result<Response> {
-        let client = Arc::clone(&self.inner);
+        let mut guard = self.inner.lock().await;
+        let inner = if guard.is_none() {
+            guard.insert(Inner::new()?)
+        } else {
+            guard.as_mut().unwrap()
+        };
+
         trace!("Request sent to runner");
-        Inner::queue_request(client, request).await
+        let rx = inner.queue_request(request)?;
+        drop(guard);
+        Ok(rx.await?)
+    }
+
+    pub async fn drop_inner(&self) {
+        let mut guard = self.inner.lock().await;
+        let _ = guard.take();
     }
 }
 
 struct Inner {
-    pipe: tokio_serde::Framed<
-        FramedWrite<WriteHalf<NamedPipeClient>, LengthDelimitedCodec>,
-        Request,
-        Request,
-        Json<Request, Request>,
-    >,
     shutdown: Option<oneshot::Sender<()>>,
-    listener_active: bool,
-    request_map: HashMap<i32, oneshot::Sender<Response>>,
-    request_id: i32,
+    message_tx: UnboundedSender<(Sender<Response>, RequestData)>,
+    _process: Child,
 }
 
 impl Inner {
-    pub fn new(pipe_name: &str) -> Result<Arc<Mutex<Inner>>> {
+    pub fn new() -> Result<Inner> {
+        let pipe_name = Uuid::new_v4().to_string();
+        let pipe_name_client = format!("\\\\.\\pipe\\{}", pipe_name);
+        let process = Command::new("acisrunner.exe")
+            .arg(pipe_name)
+            .kill_on_drop(true)
+            .spawn()?;
+
         let mut count = 0;
         let client = loop {
-            match ClientOptions::new().open(pipe_name) {
+            match ClientOptions::new().open(&pipe_name_client) {
                 Ok(client) => break client,
                 Err(e) => {
                     if count > 10 {
@@ -96,89 +108,72 @@ impl Inner {
             }
         };
 
-        let (reader, writer) = tokio::io::split(client);
         let (tx, rx) = oneshot::channel::<()>();
+        let (message_tx, message_rx) =
+            mpsc::unbounded_channel();
 
-        let length_delimited = FramedWrite::new(
-            writer,
-            LengthDelimitedCodec::builder().little_endian().new_codec(),
-        );
-
-        let serialized =
-            tokio_serde::SymmetricallyFramed::new(length_delimited, SymmetricalJson::default());
-
-        let piped = Arc::new(Mutex::new(Inner {
-            pipe: serialized,
-            shutdown: Some(tx),
-            listener_active: true,
-            request_map: HashMap::new(),
-            request_id: 0,
-        }));
-
-        let cloned = Arc::clone(&piped);
 
         tokio::spawn(async move {
-            let result = Inner::handle_requests(reader, rx, &cloned).await;
+            let result = Inner::handle_requests(client, rx, message_rx).await;
             debug!("Named pipe listener stopped {:?}", result);
         });
 
-        Ok(piped)
+        Ok(Inner {
+            shutdown: Some(tx),
+            message_tx,
+            _process: process,
+        })
     }
 
-    async fn notify_listeners(self: &mut Self, response: Response) {
-        let waiter = self.request_map.remove(&response.id);
 
-        if let Some(waiter) = waiter {
-            waiter.send(response).unwrap();
-        } else {
-            debug!("No waiter for response: {:?}", response.id);
-        }
-    }
-
-    pub async fn queue_request(
-        client: Arc<Mutex<Inner>>,
+    pub fn queue_request(
+        &mut self,
         request: RequestData,
-    ) -> Result<Response> {
+    ) -> Result<Receiver<Response>> {
         let (tx, rx) = oneshot::channel::<Response>();
-        let mut client = client.lock().await;
-        client.request_id += 1;
-        let id = client.request_id;
-        let request = Request {
-            id: client.request_id,
-            data: request,
-        };
-        client.request_map.insert(id, tx);
-        let result = client.pipe.send(request).await;
-        if let Err(e) = result {
-            client.request_map.remove(&id).unwrap();
-            return Err(Box::new(e));
-        }
-        drop(client);
-
-        Ok(rx.await?)
+        self.message_tx.send((tx, request))?;
+        Ok(rx)
     }
 
     async fn handle_requests(
-        reader: ReadHalf<NamedPipeClient>,
+        client: NamedPipeClient,
         mut rx: oneshot::Receiver<()>,
-        client: &Arc<Mutex<Inner>>,
+        mut message_rx: UnboundedReceiver<(Sender<Response>, RequestData)>,
     ) -> Result<()> {
-        let length_delimited = FramedRead::new(
-            reader,
+        let length_delimited = Framed::new(
+            client,
             LengthDelimitedCodec::builder().little_endian().new_codec(),
         );
-
         let mut serialized =
-            tokio_serde::SymmetricallyFramed::new(length_delimited, SymmetricalJson::default());
+            tokio_serde::Framed::new(length_delimited, Json::<Response, Request>::default());
+        let mut id = 0;
+        let mut request_map = HashMap::new();
+
         loop {
             tokio::select! {
-                _ = &mut rx => {
-                    break;
+                biased;
+
+                Some((tx, message)) = message_rx.recv() => {
+                    id = id + 1;
+                    let request = Request {
+                        id,
+                        data: message,
+                    };
+
+                    let _ = serialized.send(request).await?;
+                    request_map.insert(id, tx);
                 }
                 data = serialized.next() => {
                     if let Some(data) = data {
                         if let Ok(data) = data {
-                            client.lock().await.notify_listeners(data).await;
+                            match request_map.remove(&data.id) {
+                                Some(tx) => {
+                                    let _ = tx.send(data);
+                                }
+                                None => {
+                                    error!("Received response for unknown request");
+                                }
+                            }
                         } else {
                             error!("Error in response {:?}", data);
                         }
@@ -186,19 +181,22 @@ impl Inner {
                         info!("Named pipe stream closed");
                         break;
                     }
+                },
+                _ = &mut rx => {
+                    break;
                 }
             }
         }
 
-        let mut client = client.lock().await;
-        client.listener_active = false;
+        // let mut client = client.lock().await;
+        // client.listener_active = false;
 
         Ok(())
     }
 }
 
-unsafe impl Send for Inner {}
-unsafe impl Sync for Inner {}
+unsafe impl Send for Client {}
+unsafe impl Sync for Client {}
 
 impl Drop for Inner {
     fn drop(&mut self) {
