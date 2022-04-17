@@ -39,6 +39,8 @@ pub struct RequestData {
 pub struct Response {
     id: i32,
     pub data: String,
+    pub progress_messages: Option<Vec<String>>,
+    pub html_output: Option<String>,
     pub status: String,
 }
 
