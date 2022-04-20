@@ -43,7 +43,7 @@ pub struct GenevaConfig {
     threshold: Option<u32>,
     window_secs: Option<f64>,
     dry_run: bool,
-    dry_run_output: String,
+    dry_run_output: Option<String>,
 }
 
 #[derive(Derivative)]
@@ -80,7 +80,7 @@ impl GenerateConfig for GenevaConfig {
             target: "Response".to_string(),
             threshold: None,
             dry_run: false,
-            dry_run_output: ".bar = parse_json!(string!(.foo))".to_owned(),
+            dry_run_output: None,
         })
         .unwrap()
     }
@@ -143,7 +143,7 @@ impl Geneva {
             Some(Box::new(
                 Remap::new(
                     RemapConfig {
-                        source: Some(config.dry_run_output.clone()),
+                        source: config.dry_run_output.clone(),
                         file: None,
                         timezone: TimeZone::default(),
                         drop_on_error: true,
@@ -215,6 +215,8 @@ impl TaskTransform<Event> for Geneva {
                                     let parameters = render_tags(&inner.config.parameters, &event);
 
                                     if environment.is_err() || endpoint.is_err() || extension.is_err() || operation.is_err() || parameters.is_err() {
+                                        tracing::error!("Error rendering template environment: {:?}, endpoint: {:?}, extension: {:?}, operation: {:?}, parameters: {:?}",
+                                            environment, endpoint, extension, operation, parameters);
                                         event.metadata_mut().update_status(EventStatus::Errored);
                                         if let Err(_) = tx.send(event).await {
                                             tracing::info!("Event dropped");
@@ -277,8 +279,7 @@ impl TaskTransform<Event> for Geneva {
                     break;
                 }
               }
-            }
-            // .flatten(),
+            }, // .flatten(),
         )
     }
 }
