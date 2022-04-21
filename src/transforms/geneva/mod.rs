@@ -41,7 +41,7 @@ pub struct GenevaConfig {
     target: String,
     parameters: Option<IndexMap<String, String>>,
     threshold: Option<u32>,
-    window_secs: Option<f64>,
+    window_secs: Option<u64>,
     dry_run: bool,
     dry_run_output: Option<String>,
 }
@@ -172,7 +172,7 @@ impl TaskTransform<Event> for Geneva {
         let inner = self;
         let (tx, mut rx) = mpsc::channel::<Event>(1);
 
-        let quota = Quota::with_period(Duration::from_secs(inner.config.window_secs.unwrap_or(1.0)))
+        let quota = Quota::with_period(Duration::from_secs(inner.config.window_secs.unwrap_or(1)))
             .unwrap()
             .allow_burst(NonZeroU32::new(inner.config.threshold.unwrap_or(30)).unwrap());
         let target_field = inner.config.target.clone();
