@@ -76,9 +76,9 @@ impl GenerateConfig for GenevaConfig {
             endpoint: "Endpoint1".to_string(),
             operation: "JsonOutput".to_string(),
             parameters: None,
-            window_secs: None,
+            window_secs: Some(1),
             target: "Response".to_string(),
-            threshold: None,
+            threshold: Some(30),
             dry_run: false,
             dry_run_output: None,
         })
@@ -172,9 +172,9 @@ impl TaskTransform<Event> for Geneva {
         let inner = self;
         let (tx, mut rx) = mpsc::channel::<Event>(1);
 
-        let quota = Quota::with_period(Duration::from_secs(1))
+        let quota = Quota::with_period(Duration::from_secs(inner.config.window_secs.unwrap_or(1.0)));
             .unwrap()
-            .allow_burst(NonZeroU32::new(1).unwrap());
+            .allow_burst(NonZeroU32::new(inner.config.threshold.unwrap_or(30)).unwrap());
         let target_field = inner.config.target.clone();
 
         Box::pin(
